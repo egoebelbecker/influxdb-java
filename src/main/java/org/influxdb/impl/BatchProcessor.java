@@ -37,6 +37,7 @@ public class BatchProcessor {
   final int actions;
   private final TimeUnit flushIntervalUnit;
   private final int flushInterval;
+  private final int jitterInterval;
 
   /**
    * The Builder to create a BatchProcessor instance.
@@ -47,6 +48,7 @@ public class BatchProcessor {
     private int actions;
     private TimeUnit flushIntervalUnit;
     private int flushInterval;
+    private int jitterInterval;
     private BiConsumer<Iterable<Point>, Throwable> exceptionHandler = (entries, throwable) -> { };
 
     /**
@@ -96,6 +98,25 @@ public class BatchProcessor {
     }
 
     /**
+     * The interval at which at least should issued a write.
+     *
+     * @param flushInterval
+     *            the flush interval
+     * @param jitterInterval
+     *            the flush jitter interval
+     * @param unit
+     *            the TimeUnit of the interval
+     *
+     * @return this Builder to use it fluent
+     */
+    public Builder interval(final int flushInterval, final int jitterInterval, final TimeUnit unit) {
+      this.flushInterval = flushInterval;
+      this.jitterInterval = jitterInterval;
+      this.flushIntervalUnit = unit;
+      return this;
+    }
+
+    /**
      * A callback to be used when an error occurs during a batchwrite.
      *
      * @param handler
@@ -121,7 +142,7 @@ public class BatchProcessor {
       Objects.requireNonNull(this.threadFactory, "threadFactory");
       Objects.requireNonNull(this.exceptionHandler, "exceptionHandler");
       return new BatchProcessor(this.influxDB, this.threadFactory, this.actions, this.flushIntervalUnit,
-                                this.flushInterval, exceptionHandler);
+                                this.flushInterval, this.jitterInterval, exceptionHandler);
     }
   }
 
@@ -181,13 +202,14 @@ public class BatchProcessor {
   }
 
   BatchProcessor(final InfluxDBImpl influxDB, final ThreadFactory threadFactory, final int actions,
-                 final TimeUnit flushIntervalUnit, final int flushInterval,
+                 final TimeUnit flushIntervalUnit, final int flushInterval, final int jitterInterval,
                  final BiConsumer<Iterable<Point>, Throwable> exceptionHandler) {
     super();
     this.influxDB = influxDB;
     this.actions = actions;
     this.flushIntervalUnit = flushIntervalUnit;
     this.flushInterval = flushInterval;
+    this.jitterInterval = jitterInterval;
     this.scheduler = Executors.newSingleThreadScheduledExecutor(threadFactory);
     this.exceptionHandler = exceptionHandler;
     if (actions > 1 && actions < Integer.MAX_VALUE) {
@@ -195,14 +217,21 @@ public class BatchProcessor {
     } else {
         this.queue = new LinkedBlockingQueue<>();
     }
-    // Flush at specified Rate
-    this.scheduler.scheduleAtFixedRate(new Runnable() {
+
+    Runnable flushRunnable = new Runnable() {
       @Override
       public void run() {
+        // write doesn't throw any exceptions
         write();
+        int jitterInterval = (int) (Math.random() * BatchProcessor.this.jitterInterval);
+        BatchProcessor.this.scheduler.schedule(this,
+                BatchProcessor.this.flushInterval + jitterInterval, BatchProcessor.this.flushIntervalUnit);
       }
-    }, this.flushInterval, this.flushInterval, this.flushIntervalUnit);
-
+    };
+    // Flush at specified Rate
+    this.scheduler.schedule(flushRunnable,
+            this.flushInterval + (int) (Math.random() * BatchProcessor.this.jitterInterval),
+            this.flushIntervalUnit);
   }
 
   void write() {
